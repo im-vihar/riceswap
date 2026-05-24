@@ -1,0 +1,497 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# riceswap - Dynamic, safe profile swapper for Hyprland & Quickshell
+# ==============================================================================
+
+set -euo pipefail
+
+# --- PATH CONFIGURATION ---
+HYPR_LINK="$HOME/.config/hypr"
+QS_LINK="$HOME/.config/quickshell"
+ENV_FILE="$HOME/.config/hypr-session-env"
+STORE_DIR="$HOME/.config/riceswap"
+PROFILES_DIR="$STORE_DIR/profiles"
+CONFIG_FILE="$STORE_DIR/config"
+AUTOLOG_STATE_FILE="$STORE_DIR/autolog"
+
+# --- DEFAULTS (Overridden if uncommented in config file) ---
+LOGOUT_METHOD="loginctl"
+GLOBAL_DEFAULT_TYPE="modern"
+GLOBAL_LEGACY_PATH="/opt/hyprland-legacy"
+CLOCK_FORMAT="%I:%M %p"
+AUTOLOG_ENABLED=false
+
+# Load configuration and state files
+ensure_dirs() {
+    mkdir -p "$PROFILES_DIR"
+}
+
+load_autolog_state() {
+    if [ -f "$AUTOLOG_STATE_FILE" ]; then
+        AUTOLOG_ENABLED=$(cat "$AUTOLOG_STATE_FILE")
+    fi
+}
+
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        # Temporary isolation matrix to source user variables safely
+        local var_extract
+        var_extract=$(grep -E '^(LOGOUT_METHOD|GLOBAL_DEFAULT_TYPE|GLOBAL_LEGACY_PATH|CLOCK_FORMAT)=' "$CONFIG_FILE" || true)
+        if [ -n "$var_extract" ]; then
+            eval "$var_extract"
+        fi
+        # Source the whole file to ingest functions like hooks
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+    fi
+}
+
+# --- HELPER FUNCTIONS ---
+log_info() { echo -e "\e[34m[INFO]\e[0m $1"; }
+log_success() { echo -e "\e[32m[SUCCESS]\e[0m $1"; }
+log_warn() { echo -e "\e[33m[WARN]\e[0m $1"; }
+log_error() { echo -e "\e[31m[ERROR]\e[0m $1"; }
+
+show_help() {
+    local formatted_time
+    formatted_time=$(date +"$CLOCK_FORMAT")
+    cat << EOF
+riceswap - Desktop Config Swapper for Hyprland & Quickshell [System Time: $formatted_time]
+
+Usage:
+  $(basename "$0") init                  Initialize directory structure & generate template
+  $(basename "$0") list                  List profiles sorted by creation date (oldest first)
+  $(basename "$0") set [profile/ID/cmd]  Swap configurations (name, ID, 'random', or 'scroll')
+  $(basename "$0") autolog               Toggle automatic compositor logout/restart on apply
+  $(basename "$0") create <profile>      Create a new profile folder structure (empty)
+  $(basename "$0") delete <profile/ID>   Delete an inactive profile safely
+
+Commands for 'set':
+  random                                 Select a random profile
+  scroll                                 Cycle to the next alphabetical profile
+EOF
+}
+
+get_sorted_profiles() {
+    if [ -d "$PROFILES_DIR" ]; then
+        ls -1tr "$PROFILES_DIR" 2>/dev/null
+    fi
+}
+
+get_active_profile() {
+    if [ -L "$HYPR_LINK" ]; then
+        basename "$(dirname "$(readlink -f "$HYPR_LINK")")"
+    else
+        echo ""
+    fi
+}
+
+parse_profile_meta() {
+    local file="$1"
+    local key="$2"
+    local default_val="$3"
+    if [ -f "$file" ]; then
+        local val
+        val=$(grep -E "^${key}=" "$file" | cut -d'=' -f2- | tr -d '"'\'' ' || true)
+        echo "${val:-$default_val}"
+    else
+        echo "$default_val"
+    fi
+}
+
+# Auto-detect profiles without metadata using implicit structural analysis
+detect_profile_type() {
+    local target_path="$1"
+    local meta_file="$target_path/profile"
+    
+    if [ -f "$meta_file" ]; then
+        parse_profile_meta "$meta_file" "type" "$GLOBAL_DEFAULT_TYPE"
+        return
+    fi
+
+    # Deduce based on layout markers if profile file is absent
+    if [ -f "$target_path/hypr/hyprland.lua" ]; then
+        echo "modern"
+    elif [ -f "$target_path/hypr/hyprland.conf" ] && grep -q "hyprland-legacy" "$target_path/hypr/hyprland.conf" 2>/dev/null; then
+        echo "legacy"
+    else
+        echo "$GLOBAL_DEFAULT_TYPE"
+    fi
+}
+
+init_swapper() {
+    ensure_dirs
+    load_autolog_state
+
+    if [ ! -L "$HYPR_LINK" ] && [ -d "$HYPR_LINK" ]; then
+        log_warn "Physical configuration folder found at $HYPR_LINK."
+        log_info "Ingesting current layouts into 'default' profile..."
+        
+        mkdir -p "$PROFILES_DIR/default"
+        mv "$HYPR_LINK" "$PROFILES_DIR/default/hypr"
+        
+        if [ -d "$QS_LINK" ] && [ ! -L "$QS_LINK" ]; then
+            mv "$QS_LINK" "$PROFILES_DIR/default/quickshell"
+        else
+            mkdir -p "$PROFILES_DIR/default/quickshell"
+        fi
+
+        cat << EOF > "$PROFILES_DIR/default/profile"
+version=0.55
+type=modern
+path=
+EOF
+
+        ln -sfn "$PROFILES_DIR/default/hypr" "$HYPR_LINK"
+        ln -sfn "$PROFILES_DIR/default/quickshell" "$QS_LINK"
+        log_success "Ingestion completed successfully."
+    fi
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat << 'EOF' > "$CONFIG_FILE"
+# ==============================================================================
+# riceswap - Global User Configuration File
+# ==============================================================================
+# This file dictates global behaviors, fallback environmental paths, and 
+# hot-swapping execution hooks. Adjust and uncomment options below as needed.
+
+# ------------------------------------------------------------------------------
+# 1. SESSION MANAGEMENT & LOGOUT ACTIONS
+# ------------------------------------------------------------------------------
+
+# Define the method used to terminate the graphical session when 'autolog' is true.
+# Options:
+#   "standard"  - Emits 'hyprctl dispatch exit' (Can freeze if processes hang)
+#   "systemd"   - Stops the graphical session via target unit isolation maps
+#   "loginctl"  - Forcefully terminates the entire user seat session via loginctl
+# Default: "loginctl" (Highly recommended for instant, zero-hang tear downs)
+#LOGOUT_METHOD="loginctl"
+
+# ------------------------------------------------------------------------------
+# 2. GLOBAL VERSION FALLBACKS & PATHS
+# ------------------------------------------------------------------------------
+# If a profile does not specify its own values or metadata file, these globals
+# act as the default fallback architecture.
+
+# The default profile type assumed when no metadata file is found.
+# Options: "modern" (post-v0.55), "legacy" (pre-v0.55)
+#GLOBAL_DEFAULT_TYPE="modern"
+
+# The target install prefix directory used when handling legacy profiles.
+# This directory must contain 'bin/' and 'lib/' subdirectories.
+#GLOBAL_LEGACY_PATH="/opt/hyprland-legacy"
+
+# ------------------------------------------------------------------------------
+# 3. INTERFACE & LOOK-AND-FEEL STYLING
+# ------------------------------------------------------------------------------
+
+# The display format string fed to notification outputs or system status bars.
+# Uses standard 'date' command sequences (e.g., "%I:%M %p" or "%H:%M:%S").
+#CLOCK_FORMAT="%I:%M %p"
+
+# ------------------------------------------------------------------------------
+# 4. RUNTIME SWAPPING HOOKS (ADVANCED)
+# ------------------------------------------------------------------------------
+# Custom bash functions that execute during the phase transitions.
+
+pre_swap_hook() {
+    local target_profile="$1"
+    # Execute commands right BEFORE symlinks alter.
+    return 0
+}
+
+post_swap_hook() {
+    local active_profile="$1"
+    # Execute commands right AFTER symlinks alter, but BEFORE session commit.
+    return 0
+}
+EOF
+        log_info "Created GRUB-style configuration template at $CONFIG_FILE"
+    fi
+}
+
+list_profiles() {
+    if [ ! -d "$PROFILES_DIR" ]; then
+        log_error "Riceswap is not initialized. Run '$(basename "$0") init' first."
+        exit 1
+    fi
+
+    local active
+    active=$(get_active_profile)
+
+    echo "Available Profiles (by creation date):"
+    echo "--------------------------------------"
+    local idx=1
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        local p_type
+        p_type=$(detect_profile_type "$PROFILES_DIR/$name")
+        
+        if [ "$name" == "$active" ]; then
+            echo -e "  \e[32m$idx) $name (active) [$p_type] *\e[0m"
+        else
+            echo "  $idx) $name [$p_type]"
+        fi
+        idx=$((idx + 1))
+    done < <(get_sorted_profiles)
+}
+
+toggle_autolog() {
+    load_autolog_state
+    if [ "$AUTOLOG_ENABLED" = true ]; then
+        echo "false" > "$AUTOLOG_STATE_FILE"
+        log_success "Autolog disabled. Swapping configs will no longer force logout."
+    else
+        echo "true" > "$AUTOLOG_STATE_FILE"
+        log_success "Autolog enabled. Swapping configs will now exit session to apply."
+    fi
+}
+
+set_profile() {
+    local target="${1:-}"
+
+    if [ ! -d "$PROFILES_DIR" ] || [ -z "$(ls -A "$PROFILES_DIR")" ]; then
+        log_error "No profiles found."
+        exit 1
+    fi
+
+    local profiles=()
+    while IFS= read -r name; do
+        [ -n "$name" ] && profiles+=("$name")
+    done < <(get_sorted_profiles)
+
+    local count=${#profiles[@]}
+    if [ "$count" -eq 0 ]; then
+        log_error "No profiles found."
+        exit 1
+    fi
+
+    local active
+    active=$(get_active_profile)
+
+    local active_idx=-1
+    for i in "${!profiles[@]}"; do
+        if [ "${profiles[i]}" == "$active" ]; then
+            active_idx=$i
+            break
+        fi
+    done
+
+    if [ -z "$target" ]; then
+        log_info "No profile specified. Choose profile:"
+        for i in "${!profiles[@]}"; do
+            local num=$((i + 1))
+            if [ "${profiles[i]}" == "$active" ]; then
+                echo -e "  \e[32m$num) ${profiles[i]} (active)\e[0m"
+            else
+                echo "  $num) ${profiles[i]}"
+            fi
+        done
+        echo -n "Select a profile [1-$count]: "
+        read -r choice
+        target="$choice"
+    fi
+
+    if [ "$target" == "random" ]; then
+        local rand_idx=$(( RANDOM % count ))
+        target="${profiles[rand_idx]}"
+    elif [ "$target" == "scroll" ]; then
+        if [ "$active_idx" -eq -1 ]; then
+            target="${profiles[0]}"
+        else
+            local next_idx=$(( (active_idx + 1) % count ))
+            target="${profiles[next_idx]}"
+        fi
+    elif [[ "$target" =~ ^[0-9]+$ ]]; then
+        local target_idx=$((target - 1))
+        if [ "$target_idx" -ge 0 ] && [ "$target_idx" -lt "$count" ]; then
+            target="${profiles[target_idx]}"
+        else
+            log_error "Invalid profile ID: $target"
+            exit 1
+        fi
+    fi
+
+    local target_path="$PROFILES_DIR/$target"
+    if [ ! -d "$target_path" ]; then
+        log_error "Profile '$target' does not exist."
+        exit 1
+    fi
+
+    local conf_file="$target_path/hypr/hyprland.conf"
+    local lua_file="$target_path/hypr/hyprland.lua"
+    if [ ! -f "$conf_file" ] && [ ! -f "$lua_file" ]; then
+        local msg="Aborted: Target profile '$target' is missing configuration bindings!"
+        if [ -t 1 ]; then log_error "$msg"; else notify-send -r 9999 -u critical -a "riceswap" "Riceswap" "$msg"; fi
+        exit 1
+    fi
+
+    # Run auto-detection
+    local p_type
+    p_type=$(detect_profile_type "$target_path")
+    
+    local p_path
+    p_path=$(parse_profile_meta "$target_path/profile" "path" "$GLOBAL_LEGACY_PATH")
+
+    if [ "$p_type" == "legacy" ] && [ -z "$p_path" ]; then
+        local warn_msg="this profile uses pre 0.55 hyprland, define paths."
+        if [ -t 1 ]; then log_error "$warn_msg"; else notify-send -r 9999 -u critical -a "riceswap" "Riceswap" "$warn_msg"; fi
+        exit 1
+    fi
+
+    if declare -f pre_swap_hook > /dev/null; then
+        pre_swap_hook "$target"
+    fi
+
+    # Swap symlinks
+    rm -f "$HYPR_LINK" "$QS_LINK"
+    ln -sfn "$target_path/hypr" "$HYPR_LINK"
+    if [ -d "$target_path/quickshell" ]; then
+        ln -sfn "$target_path/quickshell" "$QS_LINK"
+    fi
+
+    # Write precise environmental layouts
+    if [ "$p_type" == "legacy" ]; then
+        cat << EOF > "$ENV_FILE"
+# Pre-0.55 Environment Settings
+export PATH="$p_path/bin:\$PATH"
+export LD_LIBRARY_PATH="$p_path/lib:\$LD_LIBRARY_PATH"
+export HYPRLAND_INSTANCE_SIGNATURE=""
+EOF
+    else
+        cat << EOF > "$ENV_FILE"
+# Post-0.55 Environment Settings
+export PATH=\$(echo "\$PATH" | sed -e 's|$GLOBAL_LEGACY_PATH/bin:||g')
+export LD_LIBRARY_PATH=\$(echo "\$LD_LIBRARY_PATH" | sed -e 's|$GLOBAL_LEGACY_PATH/lib:||g')
+export HYPRLAND_INSTANCE_SIGNATURE=""
+EOF
+    fi
+
+    if declare -f post_swap_hook > /dev/null; then
+        post_swap_hook "$target"
+    fi
+
+    # --- DEBOUNCED ACTION EXECUTION ---
+    load_autolog_state
+
+    if [ "$AUTOLOG_ENABLED" = true ]; then
+        notify-send -r 9999 -t 2000 -a "riceswap" "Riceswap" "Selected: $target (Exiting session in 1.5s...)"
+        
+        local timer_pid_file="/tmp/riceswap_timer.pid"
+        if [ -f "$timer_pid_file" ]; then
+            local old_pid
+            old_pid=$(cat "$timer_pid_file")
+            kill "$old_pid" 2>/dev/null || true
+        fi
+
+        (
+            sleep 1.5
+            notify-send -r 9999 -a "riceswap" "Riceswap" "Applying $target... Killing graphics server"
+
+            killall -9 quickshell ags hyprpaper waybar 2>/dev/null
+            rm -rf "$HOME/.cache/ags" "$HOME/.cache/quickshell"
+
+            XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+            rm -rf "$XDG_RUNTIME_DIR/hypr" "$XDG_RUNTIME_DIR/hyprland"*
+
+            # Session exit handling execution strategy
+            case "$LOGOUT_METHOD" in
+                loginctl)
+                    loginctl terminate-user "$USER"
+                    ;;
+                systemd)
+                    systemctl --user stop hyprland.target 2>/dev/null || loginctl terminate-user "$USER"
+                    ;;
+                standard|*)
+                    if [ "$p_type" == "legacy" ]; then
+                        "$p_path/bin/hyprctl" dispatch exit
+                    else
+                        hyprctl dispatch exit
+                    fi
+                    ;;
+            esac
+            rm -f "$timer_pid_file"
+        ) &
+        echo $! > "$timer_pid_file"
+    else
+        local msg="Linked to: $target. (Autolog is disabled)"
+        if [ -t 1 ]; then log_success "$msg"; else notify-send -r 9999 -t 3000 -a "riceswap" "Riceswap" "$msg"; fi
+    fi
+}
+
+create_profile() {
+    local name="$1"
+    local path="$PROFILES_DIR/$name"
+
+    if [ -d "$path" ]; then
+        log_warn "Profile '$name' already exists."
+        exit 0
+    fi
+
+    mkdir -p "$path/hypr" "$path/quickshell"
+    cat << 'EOF' > "$path/profile"
+version=0.55
+type=modern
+path=
+EOF
+    log_success "Profile structure '$name' created at $path"
+}
+
+delete_profile() {
+    local target="$1"
+    local active
+    active=$(get_active_profile)
+
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+        local profiles=()
+        while IFS= read -r name; do
+            [ -n "$name" ] && profiles+=("$name")
+        done < <(get_sorted_profiles)
+        
+        local target_idx=$((target - 1))
+        if [ "$target_idx" -ge 0 ] && [ "$target_idx" -lt "${#profiles[@]}" ]; then
+            target="${profiles[target_idx]}"
+        else
+            log_error "Invalid profile ID: $target"
+            exit 1
+        fi
+    fi
+
+    local target_path="$PROFILES_DIR/$target"
+    if [ ! -d "$target_path" ]; then
+        log_error "Profile '$target' does not exist."
+        exit 1
+    fi
+
+    if [ "$target" == "$active" ]; then
+        log_error "Cannot delete '$target' because it is currently active!"
+        exit 1
+    fi
+
+    rm -rf "$target_path"
+    log_success "Profile '$target' removed successfully."
+}
+
+# --- INITIAL SETUP ---
+ensure_dirs
+load_autolog_state
+load_config
+
+# --- COMMAND ROUTER ---
+if [ $# -lt 1 ]; then
+    show_help
+    exit 0
+fi
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+    init)   init_swapper ;;
+    list)   list_profiles ;;
+    set)    set_profile "${1:-}" ;;
+    autolog) toggle_autolog ;;
+    create) [ $# -lt 1 ] && log_error "Specify profile name." || create_profile "$1" ;;
+    delete) [ $# -lt 1 ] && log_error "Specify profile name or ID." || delete_profile "$1" ;;
+    *)      show_help; exit 1 ;;
+esac
