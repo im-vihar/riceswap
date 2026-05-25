@@ -124,7 +124,7 @@ $(echo -e "\e[1;33mSHARING COMMANDS:\e[0m")
   $(echo -e "\e[1;32mimport <file.tar.gz>\e[0m")       Decompress and install a profile from .tar.gz
 
 $(echo -e "\e[1;33mUTILITY COMMANDS:\e[0m")
-  $(echo -e "\e[1;32mupdate\e[0m")                     Replaces script with the (probably newer) version from github.
+  $(echo -e "\e[1;32mupdate\e[0m")                     Replace script with the (probably newer) version from GitHub.
 
 $(echo -e "\e[1;33mSWAPPING CONVENIENCES:\e[0m")
   $(echo -e "\e[1;34mrandom\e[0m")                     Swap to a randomly selected profile
