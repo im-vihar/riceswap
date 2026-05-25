@@ -7,8 +7,8 @@
 its fully crossplatform as its just a bash script.
 ### installation
 ```sh
-git clone https://github.com/im-vihar/riceswap.git
-cd riceswap && rm -f ~/.local/bin/riceswap && chmod +x riceswap && mv riceswap ~/.local/bin && riceswap && rm -rf ../riceswap && cd ~
+# not an install script, the full script that is moved to ~/.local/bin
+curl -fsSL "https://raw.githubusercontent.com/im-vihar/riceswap/main/scripts/bin/riceswap" -o ~/.local/bin/riceswap && chmod +x ~/.local/bin/riceswap && riceswap
 ```
 ### inititialize
 > [!WARNING]
