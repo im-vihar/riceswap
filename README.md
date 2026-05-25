@@ -1,4 +1,4 @@
-# riceswap
+# 🍚 riceswap
 [heavily wip] hyprland/quickshell rice swappper cli tool.
 
 ## no documentation yet, but try it out. 
