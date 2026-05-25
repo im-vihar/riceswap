@@ -114,7 +114,7 @@ $(echo -e "\e[1;33mUSAGE:\e[0m")
 $(echo -e "\e[1;33mCORE COMMANDS:\e[0m")
   $(echo -e "\e[1;32minit\e[0m")                       Initialize the engine settings and profiles directory
   $(echo -e "\e[1;32mlist\e[0m")                       List available desktop profiles (oldest first)
-  $(echo -e "\e[1;32mset [profile/index/cmd] [--nolog/-nc]\e[0m")   Swap to a profile dynamically
+  $(echo -e "\e[1;32mset [profile/index/cmd] [--nolog/-nl]\e[0m")   Swap to a profile dynamically
   $(echo -e "\e[1;32mcreate <profile>\e[0m")           Create a skeleton profile folder
   $(echo -e "\e[1;32mdelete <profile>\e[0m")           Safely purge a profile directory
   $(echo -e "\e[1;32mautolog\e[0m")                    Toggle automatic session logout/restart on swap
@@ -123,9 +123,15 @@ $(echo -e "\e[1;33mSHARING COMMANDS:\e[0m")
   $(echo -e "\e[1;32mexport <profile> [out_dir]\e[0m") Package a profile folder into a portable .tar.gz
   $(echo -e "\e[1;32mimport <file.tar.gz>\e[0m")       Decompress and install a profile from .tar.gz
 
+$(echo -e "\e[1;33mUTILITY COMMANDS:\e[0m")
+  $(echo -e "\e[1;32mupdate\e[0m")                     Replaces script with the (probably newer) version from github.
+
 $(echo -e "\e[1;33mSWAPPING CONVENIENCES:\e[0m")
   $(echo -e "\e[1;34mrandom\e[0m")                     Swap to a randomly selected profile
   $(echo -e "\e[1;34mscroll\e[0m")                     Cycle to the next profile sequentially
+
+$(echo -e "\e[1;33mOPTIONS FOR 'set':\e[0m")
+  $(echo -e "\e[1;32m--nolog, -nl\e[0m")                Bypass auto-logout/force-logout for this run, triggering active overlay reload instead
 EOF
 }
 
@@ -272,6 +278,38 @@ import_profile() {
     log_success "Successfully imported profile: $profile_name"
 }
 
+update_swapper() {
+    log_info "Checking for updates from GitHub (im-vihar/riceswap)..."
+    if ! command -v curl &>/dev/null; then
+        log_error "curl is required to update riceswap."
+        exit 1
+    fi
+
+    local script_path
+    script_path=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$HOME/.local/bin/riceswap")
+
+    log_info "Downloading latest riceswap bash script..."
+    local tmp_file
+    tmp_file=$(mktemp)
+
+    if curl -fsSL "https://raw.githubusercontent.com/im-vihar/riceswap/main/riceswap" -o "$tmp_file"; then
+        chmod +x "$tmp_file"
+        # Validate syntax of downloaded file first
+        if bash -n "$tmp_file" &>/dev/null; then
+            mv "$tmp_file" "$script_path"
+            log_success "riceswap updated successfully at $script_path!"
+        else
+            log_error "Downloaded file failed syntax validation. Aborting update."
+            rm -f "$tmp_file"
+            exit 1
+        fi
+    else
+        log_error "Failed to download update from GitHub."
+        rm -f "$tmp_file"
+        exit 1
+    fi
+}
+
 set_profile() {
     local target=""
     local opt_nolog=false
@@ -279,7 +317,7 @@ set_profile() {
     # Parse options
     while [ $# -gt 0 ]; do
         case "$1" in
-            --nolog|-nc)
+            --nolog|-nl)
                 opt_nolog=true
                 shift
                 ;;
@@ -471,5 +509,6 @@ case "$COMMAND" in
     delete)  [ $# -lt 1 ] && log_error "Usage: riceswap delete <name/index>" || delete_profile "$1" ;;
     export)  [ $# -lt 1 ] && log_error "Usage: riceswap export <profile> [out_dir]" || export_profile "$1" "${2:-.}" ;;
     import)  [ $# -lt 1 ] && log_error "Usage: riceswap import <file.tar.gz>" || import_profile "$1" ;;
+    update)  update_swapper ;;
     *)       show_help; exit 1 ;;
 esac
