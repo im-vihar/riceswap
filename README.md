@@ -8,7 +8,7 @@ its fully crossplatform as its just a bash script.
 ### installation
 ```sh
 # not an install script, the full script that is moved to ~/.local/bin
-curl -fsSL "https://raw.githubusercontent.com/im-vihar/riceswap/main/scripts/bin/riceswap" -o ~/.local/bin/riceswap && chmod +x ~/.local/bin/riceswap && riceswap
+curl -fsSL "https://raw.githubusercontent.com/im-vihar/riceswap/main/riceswap" -o ~/.local/bin/riceswap && chmod +x ~/.local/bin/riceswap && riceswap
 ```
 ### inititialize
 > [!WARNING]
